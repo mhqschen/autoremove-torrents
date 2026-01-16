@@ -1,35 +1,49 @@
-# 文件名: autoremovetorrents/condition/freespacebase.py
-
+# -*- coding:utf-8 -*-
 from .sortbase import ConditionWithSort
 
 class FreeSpaceConditionBase(ConditionWithSort):
     def __init__(self, settings):
         ConditionWithSort.__init__(self, settings['action'])
-        self._min = settings['min'] * (1 << 30) # 将配置的 GiB 转换为字节 (Bytes)
+        self._min = settings['min'] * (1 << 30) # 将 GiB 转换为 Bytes
         
-        # --- 修改点 1: 读取配置 ---
-        # 读取用户在 config.yml 里写的 seeding_time (单位: 秒)
-        # 如果用户没写，默认为 0 (即不限制)
-        self._min_seeding_time = settings.get('seeding_time', 0)
+        # --- 修改点 1: 读取特定 Tracker 的规则 ---
+        # 读取配置中的 seeding_time_per_tracker 字典
+        # 如果没配置，默认为空字典 {}
+        self._tracker_rules = settings.get('seeding_time_per_tracker', {})
 
     def apply(self, free_space, torrents):
         torrents = list(torrents)
-        # 先按用户设定的规则排序 (比如按做种时间、大小等排序)
         ConditionWithSort.sort_torrents(self, torrents)
         
         for torrent in torrents:
             if free_space < self._min:
-                # --- 修改点 2: 增加保护逻辑 ---
-                # 在决定删除之前，先检查这个种子的做种时间够不够。
-                # 如果做种时间 < 设定值，绝对不删，直接跳过，保留它。
-                if torrent.seeding_time < self._min_seeding_time:
-                    self.remain.add(torrent)
-                    continue # 跳过当前循环，去看下一个种子
-                # ---------------------------
+                # --- 修改点 2: 针对特定 Tracker 进行检查 ---
+                
+                should_protect = False # 默认不保护
+                
+                # 获取当前种子的 Tracker 地址（转为字符串以防万一）
+                # 注意：torrent.tracker 通常返回域名或 announce URL
+                current_tracker = str(torrent.tracker).lower()
 
-                # 如果时间够了，且空间依然不足，那就删掉它
+                # 遍历我们在配置文件里写的规则
+                # keyword 是你在配置里写的 (如 'hdsky')
+                # min_time 是对应的时间 (如 86400)
+                for keyword, min_time in self._tracker_rules.items():
+                    # 如果配置的关键字出现在了种子的 Tracker URL 里
+                    if keyword.lower() in current_tracker:
+                        # 且做种时间还不够
+                        if torrent.seeding_time < min_time:
+                            should_protect = True # 标记为“受保护”
+                        break # 找到匹配的站点了，停止查找其他规则
+
+                if should_protect:
+                    # 如果受保护，绝对不删，直接跳过
+                    self.remain.add(torrent)
+                    continue 
+                # ---------------------------------------
+
+                # 如果没被保护（要么没匹配到站点，要么时间够了），则执行删除
                 free_space += torrent.size
                 self.remove.add(torrent)
             else:
-                # 空间够了，剩下的都保留
                 self.remain.add(torrent)

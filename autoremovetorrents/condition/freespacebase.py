@@ -6,9 +6,14 @@ class FreeSpaceConditionBase(ConditionWithSort):
         ConditionWithSort.__init__(self, settings['action'])
         self._min = settings['min'] * (1 << 30) # 将 GiB 转换为 Bytes
         
-        # --- 修改点 1: 读取特定 Tracker 的规则 ---
-        # 读取配置中的 seeding_time_per_tracker 字典
-        # 如果没配置，默认为空字典 {}
+        # --- 修改点 1: 初始化配置 ---
+        
+        # 1. 获取全局默认限制
+        # 如果配置文件里没写 seeding_time，则默认为 0（表示无限制，随时可删）
+        self._global_seeding_time = settings.get('seeding_time', 0)
+        
+        # 2. 获取针对特定 Tracker 的规则
+        # 如果没配置，默认为空字典
         self._tracker_rules = settings.get('seeding_time_per_tracker', {})
 
     def apply(self, free_space, torrents):
@@ -17,33 +22,37 @@ class FreeSpaceConditionBase(ConditionWithSort):
         
         for torrent in torrents:
             if free_space < self._min:
-                # --- 修改点 2: 针对特定 Tracker 进行检查 ---
+                # --- 修改点 2: 判定逻辑 ---
                 
-                should_protect = False # 默认不保护
+                # 步骤 A: 设定初始阈值
+                # 默认情况下，当前种子需要满足全局设置的时间
+                required_time = self._global_seeding_time
                 
-                # 获取当前种子的 Tracker 地址（转为字符串以防万一）
-                # 注意：torrent.tracker 通常返回域名或 announce URL
+                # 步骤 B: 检查是否有特定 Tracker 的“覆盖规则”
                 current_tracker = str(torrent.tracker).lower()
-
-                # 遍历我们在配置文件里写的规则
-                # keyword 是你在配置里写的 (如 'hdsky')
-                # min_time 是对应的时间 (如 86400)
-                for keyword, min_time in self._tracker_rules.items():
-                    # 如果配置的关键字出现在了种子的 Tracker URL 里
+                
+                for keyword, specific_time in self._tracker_rules.items():
                     if keyword.lower() in current_tracker:
-                        # 且做种时间还不够
-                        if torrent.seeding_time < min_time:
-                            should_protect = True # 标记为“受保护”
-                        break # 找到匹配的站点了，停止查找其他规则
-
-                if should_protect:
-                    # 如果受保护，绝对不删，直接跳过
+                        # 发现当前种子属于特殊站点！
+                        # 使用特定规则的时间，覆盖掉全局默认时间
+                        required_time = specific_time
+                        break # 找到规则后停止查找
+                
+                # 步骤 C: 执行最终判定
+                # 如果当前做种时间 < 要求的最低时间（无论是全局的还是特例的）
+                if torrent.seeding_time < required_time:
+                    # 保护该种子，不删除
                     self.remain.add(torrent)
                     continue 
-                # ---------------------------------------
-
-                # 如果没被保护（要么没匹配到站点，要么时间够了），则执行删除
+                
+                # -----------------------
+                
+                # 如果代码走到这里，说明：
+                # 1. 空间不足
+                # 2. 且种子的做种时间已经超过了 required_time (或者 required_time 是 0)
+                # 结论：可以删除
                 free_space += torrent.size
                 self.remove.add(torrent)
             else:
+                # 空间足够，不需要删
                 self.remain.add(torrent)
